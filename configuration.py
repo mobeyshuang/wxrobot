@@ -33,6 +33,7 @@ class Config(object):
         self.NEWS = yconfig["news"]["receivers"]
         self.REPORT_REMINDERS = yconfig["report_reminder"]["receivers"]
 
+        self.DEEPSEEK = yconfig.get("deepseek", {})
         self.CHATGPT = yconfig.get("chatgpt", {})
         self.OLLAMA = yconfig.get("ollama", {})
         self.TIGERBOT = yconfig.get("tigerbot", {})

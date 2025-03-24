@@ -7,6 +7,8 @@ import xml.etree.ElementTree as ET
 from queue import Empty
 from threading import Thread
 from base.func_zhipu import ZhiPu
+from base.func_time import get_time
+from base.func_deepseek import Deepseek
 
 from wcferry import Wcf, WxMsg
 
@@ -37,45 +39,60 @@ class Robot(Job):
         self.wxid = self.wcf.get_self_wxid()
         self.allContacts = self.getAllContacts()
         self._msg_timestamps = []
+        self.chat = None
+        self.chat_type = chat_type
 
-        if ChatType.is_in_chat_types(chat_type):
-            if chat_type == ChatType.TIGER_BOT.value and TigerBot.value_check(self.config.TIGERBOT):
-                self.chat = TigerBot(self.config.TIGERBOT)
-            elif chat_type == ChatType.CHATGPT.value and ChatGPT.value_check(self.config.CHATGPT):
-                self.chat = ChatGPT(self.config.CHATGPT)
-            elif chat_type == ChatType.XINGHUO_WEB.value and XinghuoWeb.value_check(self.config.XINGHUO_WEB):
-                self.chat = XinghuoWeb(self.config.XINGHUO_WEB)
-            elif chat_type == ChatType.CHATGLM.value and ChatGLM.value_check(self.config.CHATGLM):
-                self.chat = ChatGLM(self.config.CHATGLM)
-            elif chat_type == ChatType.BardAssistant.value and BardAssistant.value_check(self.config.BardAssistant):
-                self.chat = BardAssistant(self.config.BardAssistant)
-            elif chat_type == ChatType.ZhiPu.value and ZhiPu.value_check(self.config.ZhiPu):
-                self.chat = ZhiPu(self.config.ZhiPu)
-            elif chat_type == ChatType.OLLAMA.value and Ollama.value_check(self.config.OLLAMA):
-                self.chat = Ollama(self.config.OLLAMA)
+        # 根据 chat_type 选择对应的模型
+        if chat_type == ChatType.DEEPSEEK:
+            if Deepseek.value_check(config.DEEPSEEK):
+                self.chat = Deepseek(config.DEEPSEEK)
+                self.LOG.info("已选择: Deepseek")
             else:
-                self.LOG.warning("未配置模型")
-                self.chat = None
+                self.LOG.warning("Deepseek 配置无效")
+        elif chat_type == ChatType.CHATGPT:
+            if ChatGPT.value_check(config.CHATGPT):
+                self.chat = ChatGPT(config.CHATGPT)
+                self.LOG.info("已选择: ChatGPT")
+            else:
+                self.LOG.warning("ChatGPT 配置无效")
+        elif chat_type == ChatType.CHATGLM:
+            if ChatGLM.value_check(config.CHATGLM):
+                self.chat = ChatGLM(config.CHATGLM)
+                self.LOG.info("已选择: ChatGLM")
+            else:
+                self.LOG.warning("ChatGLM 配置无效")
+        elif chat_type == ChatType.ZHIPU:
+            if ZhiPu.value_check(config.ZhiPu):
+                self.chat = ZhiPu(config.ZhiPu)
+                self.LOG.info("已选择: ZhiPu")
+            else:
+                self.LOG.warning("ZhiPu 配置无效")
+        elif chat_type == ChatType.BARD:
+            if BardAssistant.value_check(config.BardAssistant):
+                self.chat = BardAssistant(config.BardAssistant)
+                self.LOG.info("已选择: Bard")
+            else:
+                self.LOG.warning("Bard 配置无效")
+        elif chat_type == ChatType.OLLAMA:
+            if Ollama.value_check(config.OLLAMA):
+                self.chat = Ollama(config.OLLAMA)
+                self.LOG.info("已选择: Ollama")
+            else:
+                self.LOG.warning("Ollama 配置无效")
+        elif chat_type == ChatType.TIGERBOT:
+            if TigerBot.value_check(config.TIGERBOT):
+                self.chat = TigerBot(config.TIGERBOT)
+                self.LOG.info("已选择: TigerBot")
+            else:
+                self.LOG.warning("TigerBot 配置无效")
+        elif chat_type == ChatType.XINGHUO_WEB:
+            if XinghuoWeb.value_check(config.XINGHUO_WEB):
+                self.chat = XinghuoWeb(config.XINGHUO_WEB)
+                self.LOG.info("已选择: XinghuoWeb")
+            else:
+                self.LOG.warning("XinghuoWeb 配置无效")
         else:
-            if TigerBot.value_check(self.config.TIGERBOT):
-                self.chat = TigerBot(self.config.TIGERBOT)
-            elif ChatGPT.value_check(self.config.CHATGPT):
-                self.chat = ChatGPT(self.config.CHATGPT)
-            elif Ollama.value_check(self.config.OLLAMA):
-                self.chat = Ollama(self.config.OLLAMA)
-            elif XinghuoWeb.value_check(self.config.XINGHUO_WEB):
-                self.chat = XinghuoWeb(self.config.XINGHUO_WEB)
-            elif ChatGLM.value_check(self.config.CHATGLM):
-                self.chat = ChatGLM(self.config.CHATGLM)
-            elif BardAssistant.value_check(self.config.BardAssistant):
-                self.chat = BardAssistant(self.config.BardAssistant)
-            elif ZhiPu.value_check(self.config.ZhiPu):
-                self.chat = ZhiPu(self.config.ZhiPu)
-            else:
-                self.LOG.warning("未配置模型")
-                self.chat = None
-
-        self.LOG.info(f"已选择: {self.chat}")
+            self.LOG.warning("未选择有效的模型")
 
     @staticmethod
     def value_check(args: dict) -> bool:
