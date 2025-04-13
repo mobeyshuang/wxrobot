@@ -169,3 +169,39 @@ class Deepseek():
                 json.dump(self.conversation_summaries, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.LOG.error(f"保存对话总结时发生错误：{str(e)}")
+
+    def chat(self, prompt: str, role: str = None, system_prompt: str = None) -> str:
+        """直接对话，不保存对话历史
+        Args:
+            prompt: 提示词
+            role: 角色设定，可选值：default, teacher, friend, expert
+            system_prompt: 自定义系统提示词，如果提供则覆盖默认角色设定
+        Returns:
+            str: AI的回复
+        """
+        try:
+            # 构建系统提示词
+            if system_prompt:
+                system_content = system_prompt
+            elif role and role in self.role_settings:
+                system_content = self.role_settings[role]
+            else:
+                system_content = self.role_settings["default"]
+            
+            messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": prompt}
+            ]
+            
+            ret = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.2
+            )
+            rsp = ret.choices[0].message.content
+            rsp = rsp[2:] if rsp.startswith("\n\n") else rsp
+            rsp = rsp.replace("\n\n", "\n")
+            return rsp
+        except Exception as e:
+            self.LOG.error(f"直接对话时发生错误：{str(e)}")
+            return "抱歉，我现在无法回答，请稍后再试。"

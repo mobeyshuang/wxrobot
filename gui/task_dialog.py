@@ -410,4 +410,39 @@ class TaskDialog(QDialog):
         self.reply_member_combo.addItem("全部")
         for friend in sorted(friends.keys()):
             self.member_combo.addItem(friend)
-            self.reply_member_combo.addItem(friend) 
+            self.reply_member_combo.addItem(friend)
+
+    def update_member_list(self, group_name):
+        """更新群成员下拉列表"""
+        if not self.source_type_group_radio.isChecked() or not group_name:
+            return
+        
+        # 清空成员列表
+        self.member_combo.clear()
+        self.member_combo.addItem("全部")
+        
+        # 从父窗口的robot.group_members获取成员列表
+        if hasattr(self.parent(), 'robot') and hasattr(self.parent().robot, 'group_members'):
+            group_id = None
+            # 查找群ID
+            for wxid, name in self.parent().robot.allGroups.items():
+                if name == group_name:
+                    group_id = wxid
+                    break
+                
+            if group_id and group_id in self.parent().robot.group_members:
+                members = self.parent().robot.group_members[group_id]
+                member_names = []
+                for m in members:
+                    if isinstance(m, dict):
+                        member_names.append(m.get("name", ""))
+                    elif isinstance(m, str):
+                        member_names.append(m)
+                self.member_combo.addItems(member_names)
+            else:
+                # 如果缓存中没有，提示更新
+                print(f"缓存中没有找到群 {group_name} 的成员列表")
+                self.statusBar().showMessage("缓存中没有找到该群的成员列表，请点击更新群成员按钮")
+        else:
+            print("没有找到群成员缓存")
+            self.statusBar().showMessage("没有找到群成员缓存，请点击更新群成员按钮") 

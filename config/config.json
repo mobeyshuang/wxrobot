@@ -1,11 +1,75 @@
 {
   "AI_ENABLED": true,
   "GROUPS": [
-    "56790600046@chatroom",
-    "34783828724@chatroom"
+    "56790600046@chatroom"
   ],
   "USERS": [
     "wxid_m6bzl5oqvafq21",
-    "wxid_ul1gubaysvzc22"
-  ]
+    "wxid_ul1gubaysvzc22",
+    "wxid_2275932770212"
+  ],
+  "TASK_GROUPS": [
+    "56863005573@chatroom",
+    "56790600046@chatroom",
+    "52008128236@chatroom",
+    "34607605545@chatroom"
+  ],
+  "BARD": {
+    "api_key": null,
+    "model_name": "gemini-pro",
+    "proxy": "http://127.0.0.1:7890",
+    "prompt": "You am a large language model, trained by Google."
+  },
+  "CHATGLM": {
+    "key": null,
+    "api": "http://localhost:8000/v1",
+    "proxy": null,
+    "prompt": "你是智能聊天机器人，你叫小薇",
+    "file_path": "F:/Pictures/temp"
+  },
+  "CHATGPT": {
+    "key": null,
+    "api": "https://api.openai.com/v1",
+    "model": "gpt-3.5-turbo",
+    "proxy": null,
+    "prompt": "你是智能聊天机器人，你叫 wcferry"
+  },
+  "CITY_CODE": 101160101,
+  "DEEPSEEK": {
+    "key": "sk-ea3005af9b7a4cfd8e57ee96f638c574",
+    "api": "https://api.deepseek.com/v1",
+    "proxy": "",
+    "prompt": "你是一个智能AI助手 ，名叫小致 ，你是一个职场精英 ，请用简洁专业的语言回答问题，不需要太多表情符号，回答问题随机有标点符号，有时候用空格。",
+    "model": "deepseek-chat"
+  },
+  "DEFAULT_ROLE": "一个友好、专业、有趣的AI助手",
+  "NEWS": [
+    "filehelper"
+  ],
+  "OLLAMA": {
+    "enable": false,
+    "model": "deepseek-r1:1.5b",
+    "prompt": "你是智能聊天机器人，你叫",
+    "file_path": "d:/pictures/temp"
+  },
+  "REPORT_REMINDERS": [],
+  "SEND_RATE_LIMIT": 15,
+  "TIGERBOT": {
+    "key": null,
+    "model": null
+  },
+  "WEATHER": [
+    "郭蕾"
+  ],
+  "WECHAT_FILES_DIR": "D:/wechatfiledownload/WeChat Files/zy_amazing/FileStorage/File",
+  "XINGHUO_WEB": {
+    "cookie": null,
+    "fd": null,
+    "GtToken": null,
+    "prompt": "你是智能聊天机器人，你叫 wcferry。请用这个角色回答我的问题"
+  },
+  "ZHIPU": {
+    "api_key": null,
+    "model": null
+  }
 }

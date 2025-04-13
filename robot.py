@@ -5,12 +5,13 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from queue import Empty
-from threading import Thread
+from threading import Thread, Timer
 from base.func_zhipu import ZhiPu
 from base.func_time import get_time
 from base.func_deepseek import Deepseek
 
 from wcferry import Wcf, WxMsg
+from PyQt5.QtCore import QTimer
 
 from base.func_bard import BardAssistant
 from base.func_chatglm import ChatGLM
@@ -26,6 +27,8 @@ from constants import ChatType
 from job_mgmt import Job
 import os
 import json
+from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 
 __version__ = "39.2.4.0"
 
@@ -34,82 +37,87 @@ class Robot(Job):
     """个性化自己的机器人
     """
 
-    def __init__(self, config: Config, wcf: Wcf, chat_type: int) -> None:
-        self.wcf = wcf
+    def __init__(self, config: Config, wcf: Wcf, chat_type: int, load_from_cache=True) -> None:
+        super().__init__()
+        self.LOG = logging.getLogger(self.__class__.__name__)
         self.config = config
-        self.LOG = logging.getLogger("Robot")
+        self.wcf = wcf
         self.wxid = self.wcf.get_self_wxid()
+        self.nickname = ""
+        self.enable_AI = True
+        self.data_path = os.path.join("config", "data")
+        # 创建数据目录，如果不存在
+        if not os.path.exists(self.data_path):
+            os.makedirs(self.data_path)
         
-        # 获取并存储所有联系人信息
-        self.contacts = self.wcf.get_contacts()
-        # 获取并存储所有群组信息
-        self.allGroups = self.getAllGroups()
-        # 首次更新配置
-        self.config.reload()
-        self.LOG.info("已完成首次配置和联系人信息更新")
+        # 联系人和群组缓存文件路径
+        self.contacts_cache_file = os.path.join(self.data_path, "contacts.json")
+        self.groups_cache_file = os.path.join(self.data_path, "groups.json")
+        self.group_members_cache_file = os.path.join(self.data_path, "group_members.json")
         
-        self._msg_timestamps = []
-        self.chat = None
-        self.chat_type = chat_type
-        self._user_states = {}  # 用于跟踪用户的设置状态
-        self._user_roles = {}   # 用户角色设置
-        self._chat_history = {} # 用户对话历史
-        self._last_chat_time = {} # 用户最后对话时间
+        # 初始化联系人和群组
+        self.contacts = []
+        self.allGroups = {}
+        self.group_members = {}  # 群组成员信息缓存
         
-        # 加载已保存的用户角色设置
+        # 优先从缓存加载联系人和群组信息
+        if load_from_cache:
+            loaded = self.load_contacts_from_cache()
+            if loaded:
+                self.LOG.info("已从缓存加载联系人和群组信息")
+            else:
+                self.LOG.info("未找到联系人缓存或加载失败，将从微信获取")
+                self.update_contacts_and_groups()
+        else:
+            self.update_contacts_and_groups()
+
+        # 用户角色管理
+        self._user_roles = {}
         self._load_user_roles()
+
+        # 设置状态存储
+        self._user_states = {}
         
-        # 根据 chat_type 选择对应的模型
+        # 聊天历史记录存储
+        self._chat_history = {}
+        self._last_chat_time = {}
+        
+        # 消息频率限制
+        self._msg_timestamps = []
+
+        # 计算周几
+        weekday = datetime.now().weekday()
+        # 设置默认值，防止配置文件中没有这些属性
+        weather_days = getattr(self.config, 'WEATHER_DAYS', [0, 1, 2, 3, 4, 5, 6])  # 默认每天
+        news_days = getattr(self.config, 'NEWS_DAYS', [0, 1, 2, 3, 4, 5, 6])  # 默认每天
+        
+        # 天气与新闻
+        if weekday in weather_days and datetime.now().hour in [7, 8, 9] and self.config.CITY_CODE:
+            if self.config.WEATHER:
+                self.onEveryTime("07:30", self.weatherReport, self.config.WEATHER)
+        if weekday in news_days and datetime.now().hour in [7, 8, 9]:
+            if self.config.NEWS:
+                self.onEveryTime("07:35", self.newsReport)
+
+        # 根据聊天类型初始化AI聊天模型
+        self.chat = None
         if chat_type == ChatType.DEEPSEEK:
             if Deepseek.value_check(config.DEEPSEEK):
                 self.chat = Deepseek(config.DEEPSEEK)
                 self.LOG.info("已选择: Deepseek")
             else:
                 self.LOG.warning("Deepseek 配置无效")
-        elif chat_type == ChatType.CHATGPT:
-            if ChatGPT.value_check(config.CHATGPT):
-                self.chat = ChatGPT(config.CHATGPT)
-                self.LOG.info("已选择: ChatGPT")
-            else:
-                self.LOG.warning("ChatGPT 配置无效")
-        elif chat_type == ChatType.CHATGLM:
-            if ChatGLM.value_check(config.CHATGLM):
-                self.chat = ChatGLM(config.CHATGLM)
-                self.LOG.info("已选择: ChatGLM")
-            else:
-                self.LOG.warning("ChatGLM 配置无效")
-        elif chat_type == ChatType.ZHIPU:
-            if ZhiPu.value_check(config.ZhiPu):
-                self.chat = ZhiPu(config.ZhiPu)
-                self.LOG.info("已选择: ZhiPu")
-            else:
-                self.LOG.warning("ZhiPu 配置无效")
-        elif chat_type == ChatType.BARD:
-            if BardAssistant.value_check(config.BardAssistant):
-                self.chat = BardAssistant(config.BardAssistant)
-                self.LOG.info("已选择: Bard")
-            else:
-                self.LOG.warning("Bard 配置无效")
-        elif chat_type == ChatType.OLLAMA:
-            if Ollama.value_check(config.OLLAMA):
-                self.chat = Ollama(config.OLLAMA)
-                self.LOG.info("已选择: Ollama")
-            else:
-                self.LOG.warning("Ollama 配置无效")
-        elif chat_type == ChatType.TIGERBOT:
-            if TigerBot.value_check(config.TIGERBOT):
-                self.chat = TigerBot(config.TIGERBOT)
-                self.LOG.info("已选择: TigerBot")
-            else:
-                self.LOG.warning("TigerBot 配置无效")
-        elif chat_type == ChatType.XINGHUO_WEB:
-            if XinghuoWeb.value_check(config.XINGHUO_WEB):
-                self.chat = XinghuoWeb(config.XINGHUO_WEB)
-                self.LOG.info("已选择: XinghuoWeb")
-            else:
-                self.LOG.warning("XinghuoWeb 配置无效")
-        else:
-            self.LOG.warning("未选择有效的模型")
+
+        # 获取所有群组信息
+        self.allGroups = self.getAllGroups()
+        # 更新群成员信息，只对配置的群更新
+        for group in self.config.get_groups():
+            members = self.wcf.get_chatroom_members(group)
+            if members:
+                self.LOG.info(f"群 {self.allGroups.get(group, group)} 更新群成员成功：{len(members)} 人")
+                
+        # 更新联系人信息
+        self.update_contact_info()
 
     @staticmethod
     def value_check(args: dict) -> bool:
@@ -214,25 +222,48 @@ class Robot(Job):
         此处可进行自定义发送的内容,如通过 msg.content 关键字自动获取当前天气信息，并发送到对应的群组@发送者
         群号：msg.roomid  微信ID：msg.sender  消息内容：msg.content
         """
-        # 检查是否是本人发送的消息且在设置状态
-        if msg.from_self():
+        # 检查task_executor是否已初始化并可用
+        has_executor = hasattr(self, 'task_executor') and self.task_executor is not None
+        if not has_executor:
+            # 只在第一次检测到时打印警告，避免日志被刷爆
+            if not hasattr(self, '_warned_no_executor'):
+                self.LOG.warning("任务执行器尚未初始化，可能会影响消息处理")
+                self._warned_no_executor = True
+            
+        # 检查是否是本人发送给本人的^设置命令
+        if msg.from_self() :
             if msg.content.strip() == "^设置":
-                self.LOG.info("收到本人发送的^设置命令")
-                self._handle_settings(msg.sender)
+                self.LOG.info("收到本人发送给自己的^设置 命令")
+                # 使用新的设置处理方法
+                self._handle_settings_command(msg.sender)
                 return
-            elif msg.content.strip() == "^更新$":
+            if msg.content.strip() == "^更新":
                 self.update_contact_info()
                 self.config.reload()
                 self.LOG.info("已更新配置和联系人信息")
                 return
-            elif msg.sender in self._user_states:
+            # 检查是否是本人发送的其他消息
+            if msg.sender in self._user_states:
+                # 如果还有旧的状态处理，使用它处理
                 self._handle_setting_response(msg)
                 return
-
         # 群聊消息
         if msg.from_group():
-            # 如果在群里被 @ 或者是配置的群组
-            if msg.roomid in self.config.get_groups():
+            
+            # 打印群消息，方便调试
+            try:
+                group_name = self.allGroups.get(msg.roomid, msg.roomid)
+                sender_name = self.wcf.get_alias_in_chatroom(msg.sender, msg.roomid) or msg.sender
+                self.LOG.info(f"群消息 [{group_name}] {sender_name}: {msg.content[:50]}")
+            except Exception as e:
+                self.LOG.error(f"打印群消息出错: {e}")
+            
+            # 检查是否是配置的群组或任务相关群组
+            is_in_config_groups = msg.roomid in self.config.get_groups()
+            is_in_task_groups = hasattr(self.config, 'get_task_groups') and msg.roomid in self.config.get_task_groups()
+            
+            # 对配置的群组应用特殊功能
+            if is_in_config_groups:
                 # 检查是否被@或者@所有人
                 if msg.is_at(self.wxid) or "@所有人" in msg.content:
                     # 检查消息内容是否包含特定关键词
@@ -241,11 +272,29 @@ class Robot(Job):
                     if any(keyword in content for keyword in keywords):
                         self.sendTextMsg("收到", msg.roomid)  # 移除@发送者
                         return
-                    
                     # 如果不是特定关键词，则按正常@消息处理
                     self.toAt(msg)
-                else:  # 其他消息
-                    self.toChengyu(msg)
+            
+            # 对于任务相关群，启用消息转发 - 使用if而不是elif，允许配置群同时是任务群
+            if is_in_task_groups:
+                # 将消息传递给任务执行器处理
+                if has_executor:
+                    try:
+                        self.LOG.info(f"处理任务群消息: [{self.allGroups.get(msg.roomid, msg.roomid)}]")
+                        self.task_executor.add_message(msg)
+                    except Exception as e:
+                        self.LOG.error(f"任务执行器处理消息失败: {e}")
+                        import traceback
+                        self.LOG.error(traceback.format_exc())
+                else:
+                    # 只在每个群的第一条消息时打印警告
+                    if not hasattr(self, '_warned_groups'):
+                        self._warned_groups = set()
+                    if msg.roomid not in self._warned_groups:
+                        self.LOG.warning(f"任务执行器未初始化，无法处理群 {self.allGroups.get(msg.roomid, msg.roomid)} 的消息")
+                        self._warned_groups.add(msg.roomid)
+            
+            # 对未配置的非任务群组，不做任何处理
             return
 
         # 非群聊信息，按消息类型进行处理
@@ -261,15 +310,21 @@ class Robot(Job):
             else:
                 self.toChitchat(msg)  # 闲聊
 
-    def _handle_settings(self, sender: str) -> None:
-        """处理设置命令"""
-        ai_status = "开启 ✅" if self.config.AI_ENABLED else "关闭 ❌"
+    def _handle_settings_command(self, sender: str) -> None:
+        """处理设置命令，提供设置菜单"""
+        # 当前AI功能状态
+        ai_status = "✅ 开启" if self.config.AI_ENABLED else "❌ 关闭"
+        user_count = len(self.config.get_users())
+        group_count = len(self.config.get_groups())
+        
         menu = f"""【微信机器人设置】
-当前AI回答状态：{ai_status}
+当前AI状态: {ai_status}
+授权用户数: {user_count}
+授权群组数: {group_count}
 
 请回复数字选择功能:
-1. 开启AI
-2. 关闭AI
+1. 启用用户AI权限
+2. 禁用用户AI权限
 3. 添加用户
 4. 删除用户
 5. 查看用户列表
@@ -278,16 +333,40 @@ class Robot(Job):
 8. 查看群组列表
 9. 查看用户角色
 10. 设置用户角色
+11. 设置自动回复关键词
+12. 更新用户和群列表
+
 0. 退出设置"""
         
         # 重置用户状态为等待选项
-        self._user_states[sender] = {"state": "waiting_for_option"}
+        self._user_states[sender] = {
+            "state": "waiting_for_option"
+        }
+        
+        # 取消已有的定时器(如果存在)
+        if hasattr(self, '_settings_timer') and self._settings_timer:
+            self._settings_timer.cancel()
+        
+        # 创建新的定时器，30秒后超时
+        self._settings_timer = Timer(30.0, self._exit_settings, args=[sender])
+        self._settings_timer.daemon = True  # 设置为守护线程，确保程序退出时线程会被终止
+        self._settings_timer.start()
+        
         self.sendTextMsg(menu, sender)
 
     def _handle_setting_response(self, msg: WxMsg) -> None:
         """处理用户对设置的响应"""
         sender = msg.sender
         content = msg.content.strip()
+        
+        # 重置定时器
+        if hasattr(self, '_settings_timer') and self._settings_timer:
+            self._settings_timer.cancel()  # 取消旧定时器
+            # 创建新定时器
+            self._settings_timer = Timer(30.0, self._exit_settings, args=[sender])
+            self._settings_timer.daemon = True
+            self._settings_timer.start()
+            
         state = self._user_states.get(sender, {}).get("state")
         
         if state == "waiting_for_option":
@@ -297,26 +376,31 @@ class Robot(Job):
             elif content == "1":  # 开启AI
                 self.config.AI_ENABLED = True
                 self.sendTextMsg("已开启AI功能 ✅", sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             elif content == "2":  # 关闭AI
                 self.config.AI_ENABLED = False
                 self.sendTextMsg("已关闭AI功能 ✅", sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             elif content == "3":  # 添加用户
-                self._user_states[sender] = {"state": "waiting_for_add_user"}
+                self._user_states[sender] = {
+                    "state": "waiting_for_add_user"
+                }
                 self.sendTextMsg("请发送要添加的用户微信号或名片", sender)
             elif content == "4":  # 删除用户
                 users = self.config.get_users()
                 if not users:
                     self.sendTextMsg("当前没有允许使用AI的用户", sender)
-                    self._handle_settings(sender)  # 返回菜单
+                    self._handle_settings_command(sender)  # 返回菜单
                     return
                 user_list = "当前用户列表：\n"
                 for i, user in enumerate(users, 1):
                     display_name = self._get_user_display_name(user)
                     user_list += f"{i}. {display_name}\n"
                 user_list += "\n请回复序号删除对应用户"
-                self._user_states[sender] = {"state": "waiting_for_delete_user", "users": users}
+                self._user_states[sender] = {
+                    "state": "waiting_for_delete_user", 
+                    "users": users
+                }
                 self.sendTextMsg(user_list, sender)
             elif content == "5":  # 查看用户列表
                 users = self.config.get_users()
@@ -329,22 +413,27 @@ class Robot(Job):
                         role = self._get_user_role(user)
                         user_list += f"{i}. {display_name}\n   角色: {role}\n"
                     self.sendTextMsg(user_list, sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             elif content == "6":  # 添加群组
-                self._user_states[sender] = {"state": "waiting_for_add_group"}
+                self._user_states[sender] = {
+                    "state": "waiting_for_add_group"
+                }
                 self.sendTextMsg("请发送要添加的群名称，我会自动匹配群ID", sender)
             elif content == "7":  # 删除群组
                 groups = self.config.get_groups()
                 if not groups:
                     self.sendTextMsg("当前没有配置的群组", sender)
-                    self._handle_settings(sender)  # 返回菜单
+                    self._handle_settings_command(sender)  # 返回菜单
                     return
                 group_list = "当前群组列表：\n"
                 for i, group_id in enumerate(groups, 1):
                     group_name = self.allGroups.get(group_id, group_id)
                     group_list += f"{i}. {group_name} ({group_id})\n"
                 group_list += "\n请回复序号删除对应群组"
-                self._user_states[sender] = {"state": "waiting_for_delete_group", "groups": groups}
+                self._user_states[sender] = {
+                    "state": "waiting_for_delete_group", 
+                    "groups": groups
+                }
                 self.sendTextMsg(group_list, sender)
             elif content == "8":  # 查看群组列表
                 groups = self.config.get_groups()
@@ -356,7 +445,7 @@ class Robot(Job):
                         group_name = self.allGroups.get(group_id, group_id)
                         group_list += f"{i}. {group_name} ({group_id})\n"
                     self.sendTextMsg(group_list, sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             elif content == "9":  # 查看用户角色
                 users = self.config.get_users()
                 if not users:
@@ -368,19 +457,22 @@ class Robot(Job):
                         role = self._get_user_role(user)
                         role_list += f"{i}. {display_name}\n   角色: {role}\n"
                     self.sendTextMsg(role_list, sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             elif content == "10":  # 设置用户角色
                 users = self.config.get_users()
                 if not users:
                     self.sendTextMsg("当前没有允许使用AI的用户", sender)
-                    self._handle_settings(sender)  # 返回菜单
+                    self._handle_settings_command(sender)  # 返回菜单
                     return
                 user_list = "请选择要设置角色的用户（回复序号）：\n"
                 for i, user in enumerate(users, 1):
                     display_name = self._get_user_display_name(user)
                     role = self._get_user_role(user)
                     user_list += f"{i}. {display_name}\n   当前角色: {role}\n"
-                self._user_states[sender] = {"state": "waiting_for_select_user_role", "users": users}
+                self._user_states[sender] = {
+                    "state": "waiting_for_select_user_role", 
+                    "users": users
+                }
                 self.sendTextMsg(user_list, sender)
             else:
                 self.sendTextMsg("无效的选项，请重新输入", sender)
@@ -437,7 +529,7 @@ class Robot(Job):
                     return  # 不返回菜单，等待用户选择
             else:
                 self.sendTextMsg("请输入有效的微信昵称、微信号或备注名", sender)
-            self._handle_settings(sender)  # 返回菜单
+            self._handle_settings_command(sender)  # 返回菜单
             
         elif state == "waiting_for_select_user":
             # 处理用户选择
@@ -456,7 +548,7 @@ class Robot(Job):
                     self.sendTextMsg("无效的序号，请重新输入", sender)
             except ValueError:
                 self.sendTextMsg("请输入有效的数字", sender)
-            self._handle_settings(sender)  # 返回菜单
+            self._handle_settings_command(sender)  # 返回菜单
             
         elif state == "waiting_for_delete_user":
             # 处理删除用户
@@ -488,7 +580,7 @@ class Robot(Job):
                     self.sendTextMsg("无效的序号，请重新输入", sender)
             except ValueError:
                 self.sendTextMsg("请输入有效的数字", sender)
-            self._handle_settings(sender)  # 返回菜单
+            self._handle_settings_command(sender)  # 返回菜单
             
         elif state == "waiting_for_add_group":
             # 处理添加群组
@@ -499,7 +591,7 @@ class Robot(Job):
             
             if not found_groups:
                 self.sendTextMsg(f"未找到名称包含 '{group_name}' 的群组", sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             elif len(found_groups) == 1:
                 # 只找到一个匹配的群组，直接添加
                 group_id, group_name = found_groups[0]
@@ -507,7 +599,7 @@ class Robot(Job):
                     self.sendTextMsg(f"已成功添加群组：{group_name} ({group_id}) ✅", sender)
                 else:
                     self.sendTextMsg(f"添加群组失败，该群组可能已在列表中", sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
             else:
                 # 找到多个匹配的群组，让用户选择
                 group_list = "找到多个匹配的群组，请回复序号选择要添加的群组：\n"
@@ -534,7 +626,7 @@ class Robot(Job):
                     self.sendTextMsg("无效的序号，请重新输入", sender)
             except ValueError:
                 self.sendTextMsg("请输入有效的数字", sender)
-            self._handle_settings(sender)  # 返回菜单
+            self._handle_settings_command(sender)  # 返回菜单
             
         elif state == "waiting_for_delete_group":
             # 处理删除群组
@@ -561,7 +653,7 @@ class Robot(Job):
                     self.sendTextMsg("无效的序号，请重新输入", sender)
             except ValueError:
                 self.sendTextMsg("请输入有效的数字", sender)
-            self._handle_settings(sender)  # 返回菜单
+            self._handle_settings_command(sender)  # 返回菜单
             
         elif state == "waiting_for_select_user_role":
             try:
@@ -583,7 +675,7 @@ class Robot(Job):
                     self.sendTextMsg("无效的序号，请重新输入", sender)
             except ValueError:
                 self.sendTextMsg("请输入有效的数字", sender)
-                self._handle_settings(sender)  # 返回菜单
+                self._handle_settings_command(sender)  # 返回菜单
                 
         elif state == "waiting_for_input_role":
             selected_user = self._user_states[sender].get("selected_user")
@@ -594,7 +686,7 @@ class Robot(Job):
                 self.sendTextMsg(f"已为用户 {display_name} 设置新角色 ✅", sender)
             else:
                 self.sendTextMsg("设置失败，未找到选择的用户", sender)
-            self._handle_settings(sender)  # 返回菜单
+            self._handle_settings_command(sender)  # 返回菜单
 
     def onMsg(self, msg: WxMsg) -> int:
         try:
@@ -614,7 +706,7 @@ class Robot(Job):
             while wcf.is_receiving_msg():
                 try:
                     msg = wcf.get_msg()
-                    self.LOG.info(msg)
+                    #self.LOG.info(msg)
                     self.processMsg(msg)
                 except Empty:
                     continue  # Empty message
@@ -669,8 +761,15 @@ class Robot(Job):
         获取群组（包括好友、公众号、服务号、群成员……）
         格式: {"wxid": "NickName"}
         """
-        groups = self.wcf.query_sql("MicroMsg.db", "SELECT UserName, NickName FROM Contact;")
-        return {contact["UserName"]: contact["NickName"] for contact in groups}
+        try:
+            groups = self.wcf.query_sql("MicroMsg.db", "SELECT UserName, NickName FROM Contact;")
+            if not groups:
+                self.LOG.warning("未获取到任何群组信息")
+                return {}
+            return {contact["UserName"]: contact["NickName"] for contact in groups}
+        except Exception as e:
+            self.LOG.error(f"获取群组信息失败: {str(e)}")
+            return {}
 
     def keepRunningAndBlockProcess(self) -> None:
         """
@@ -698,12 +797,29 @@ class Robot(Job):
             self.allGroups[msg.sender] = nickName[0]
             self.sendTextMsg(f"Hi {nickName[0]}，我自动通过了你的好友请求。", msg.sender)
 
-    def newsReport(self) -> None:
-        receivers = self.config.NEWS
+    def newsReport(self, receivers=None) -> None:
+        """
+        发送新闻报告
+        
+        Args:
+            receivers: 可选的接收者列表。如果为None，则使用配置中的NEWS设置
+        """
+        if receivers is None:
+            receivers = self.config.NEWS
+        elif isinstance(receivers, str):
+            # 处理单个接收者的情况（字符串）
+            receivers = [receivers]
+        
         if not receivers:
             return
 
         news = News().get_important_news()
+        for r in receivers:
+            self.sendTextMsg(news, r)
+        news = News().get_domestic_news()
+        for r in receivers:
+            self.sendTextMsg(news, r)
+        news = News().get_tech_news()
         for r in receivers:
             self.sendTextMsg(news, r)
 
@@ -713,8 +829,27 @@ class Robot(Job):
             return
 
         report = Weather(self.config.CITY_CODE).get_weather()
+        
+        # 使用 DeepSeek 生成祝福语
+        if self.chat and isinstance(self.chat, Deepseek):
+            prompt = f"""请根据以上天气信息输出一句与天气有关的祝福语,并加一个emoji。"
+
+天气信息：
+{report}"""
+            
+            # 使用自定义系统提示词
+            system_prompt = "你是对话助手，正常回答对话，不需要进行多余的解释。"
+            blessing = self.chat.chat(prompt, system_prompt=system_prompt)
+            if blessing:
+                report += f"\n\n{blessing}"
+        
         for r in receivers:
-            self.sendTextMsg(report, r)
+            # 特殊处理 filehelper
+            if r == "filehelper":
+                self.sendTextMsg(report, r)
+            else:
+                wxid = get_wxid_by_name(self, r)
+                self.sendTextMsg(report, wxid)
 
     def _load_user_roles(self) -> None:
         """从文件加载用户角色设置"""
@@ -865,10 +1000,384 @@ class Robot(Job):
         return context
 
     def update_contact_info(self):
-        """更新联系人和群组信息"""
+        """更新联系人和群组信息（兼容方法，请直接使用update_contacts_and_groups）"""
+        # 直接调用更新方法
+        return self.update_contacts_and_groups()
+
+    def _exit_settings(self, sender: str) -> None:
+        """超时退出设置模式"""
+        if sender in self._user_states:
+            self.sendTextMsg("设置会话已超时，已自动退出设置模式。", sender)
+            del self._user_states[sender]
+            self.LOG.info("设置会话已超时，已自动退出设置模式")
+            
+        # 取消定时器
+        if hasattr(self, '_settings_timer') and self._settings_timer:
+            self._settings_timer.cancel()
+            self._settings_timer = None
+
+    def cleanup(self):
+        """统一的资源清理方法，确保所有退出路径都执行相同的清理流程"""
         try:
-            self.contacts = self.wcf.get_contacts()
-            self.allGroups = self.getAllGroups()
-            self.LOG.info("已更新联系人和群组信息")
+            print("执行机器人资源清理...")
+            
+            # 停止消息接收
+            try:
+                print("停止消息接收...")
+                self.wcf.disable_recv_msg()
+                print("消息接收已停止")
+            except Exception as e:
+                print(f"停止消息接收出错: {e}")
+            
+            # 清理wcf资源
+            try:
+                print("清理wcf资源...")
+                # 设置一个标志，避免重复清理
+                if hasattr(self, '_wcf_cleanup_done') and self._wcf_cleanup_done:
+                    print("wcf已经被清理过，跳过")
+                    return True
+                
+                import threading
+                import time
+                
+                # 定义一个计数器和事件
+                cleanup_done = threading.Event()
+                
+                # 清理函数
+                def do_cleanup():
+                    try:
+                        print("开始执行wcf.cleanup()...")
+                        # 添加超时控制
+                        self.wcf.cleanup()
+                        self._wcf_cleanup_done = True
+                        print("wcf.cleanup()执行完成")
+                        cleanup_done.set()
+                    except Exception as e:
+                        print(f"wcf.cleanup方法出错: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        cleanup_done.set()
+                
+                # 启动清理线程
+                cleanup_thread = threading.Thread(target=do_cleanup)
+                cleanup_thread.daemon = True
+                cleanup_thread.start()
+                
+                # 等待清理完成，最多等待1.5秒 (减少超时时间，避免卡死)
+                start_time = time.time()
+                result = cleanup_done.wait(1.5)
+                elapsed_time = time.time() - start_time
+                
+                if not result:
+                    print(f"警告: wcf资源清理超时({elapsed_time:.2f}秒)，将强制终止清理线程")
+                    # 无论成功与否，都设置清理标志，避免重复清理
+                    self._wcf_cleanup_done = True
+                    print("已标记清理完成，程序将继续退出")
+                else:
+                    print(f"wcf资源清理完成，耗时: {elapsed_time:.2f}秒")
+            except Exception as e:
+                print(f"清理wcf资源过程出错: {e}")
+                import traceback
+                traceback.print_exc()
+                # 设置清理标志，避免重复清理
+                self._wcf_cleanup_done = True
+            
+            # 停止任务执行器
+            if hasattr(self, 'task_executor') and self.task_executor:
+                try:
+                    print("停止任务执行器...")
+                    self.task_executor.stop()
+                    print("任务执行器已停止")
+                except Exception as e:
+                    print(f"停止任务执行器出错: {e}")
+                
+            print("机器人资源清理完成")
+            return True
+        except Exception as e:
+            print(f"机器人资源清理过程中出错: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # 即使出错也标记清理已完成，避免卡死
+            self._wcf_cleanup_done = True
+            
+            return False
+
+    def __del__(self):
+        """对象销毁时的清理工作"""
+        try:
+            # 取消所有定时器
+            if hasattr(self, '_settings_timer') and self._settings_timer:
+                self._settings_timer.cancel()
+                self._settings_timer = None
+            
+            # 调用通用清理方法
+            if hasattr(self, 'cleanup'):
+                self.cleanup()
+            
+            self.LOG.info("Robot对象已销毁，资源已清理")
+        except Exception as e:
+            # 即使发生异常也不抛出，防止在程序结束时引发问题
+            if hasattr(self, 'LOG'):
+                self.LOG.error(f"Robot对象销毁时出错: {e}")
+            # 尝试最后一次cleanup
+            try:
+                if hasattr(self, 'wcf'):
+                    self.wcf.disable_recv_msg()
+                    self.wcf.cleanup()
+            except:
+                pass
+
+    def update_contacts_and_groups(self):
+        """更新联系人和群组信息"""
+        self.LOG.info("正在从微信获取联系人和群组信息...")
+        try:
+            # 获取联系人列表
+            contacts = self.wcf.get_contacts()
+            if not contacts:
+                self.LOG.warning("获取联系人失败，可能是微信未登录或API调用失败")
+            else:
+                self.contacts = contacts
+                self.LOG.info(f"获取到 {len(contacts)} 个联系人")
+            
+            # 获取群组列表
+            groups = {}
+            # 使用getAllGroups方法替代不存在的get_chatrooms方法
+            all_contacts = self.getAllGroups()
+            for wxid, name in all_contacts.items():
+                if wxid and "@chatroom" in wxid:
+                    groups[wxid] = name
+            
+            if not groups:
+                self.LOG.warning("获取群组失败，可能是微信未登录或API调用失败")
+            else:
+                self.allGroups = groups
+                self.LOG.info(f"获取到 {len(groups)} 个群组")
+            
+            # 保存到缓存
+            self.save_contacts_to_cache()
+            
+            return True
         except Exception as e:
             self.LOG.error(f"更新联系人和群组信息失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def load_contacts_from_cache(self):
+        """从缓存文件加载联系人和群组信息"""
+        try:
+            # 加载联系人
+            if os.path.exists(self.contacts_cache_file):
+                with open(self.contacts_cache_file, "r", encoding="utf-8") as f:
+                    self.contacts = json.load(f)
+                self.LOG.info(f"从缓存加载了 {len(self.contacts)} 个联系人")
+            else:
+                self.LOG.warning("联系人缓存文件不存在")
+                return False
+            
+            # 加载群组
+            if os.path.exists(self.groups_cache_file):
+                with open(self.groups_cache_file, "r", encoding="utf-8") as f:
+                    self.allGroups = json.load(f)
+                self.LOG.info(f"从缓存加载了 {len(self.allGroups)} 个群组")
+            else:
+                self.LOG.warning("群组缓存文件不存在")
+                return False
+            
+            # 加载群成员信息
+            if os.path.exists(self.group_members_cache_file):
+                with open(self.group_members_cache_file, "r", encoding="utf-8") as f:
+                    self.group_members = json.load(f)
+                self.LOG.info(f"从缓存加载了 {len(self.group_members)} 个群的成员信息")
+            
+            # 检查数据有效性
+            if not self.contacts or not self.allGroups:
+                self.LOG.warning("缓存数据不完整，需要重新获取")
+                return False
+            
+            return True
+        except Exception as e:
+            self.LOG.error(f"加载联系人和群组缓存失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def save_contacts_to_cache(self):
+        """保存联系人和群组信息到缓存文件"""
+        try:
+            # 保存联系人
+            with open(self.contacts_cache_file, "w", encoding="utf-8") as f:
+                json.dump(self.contacts, f, ensure_ascii=False, indent=2)
+            self.LOG.info(f"已保存 {len(self.contacts)} 个联系人到缓存")
+            
+            # 保存群组
+            with open(self.groups_cache_file, "w", encoding="utf-8") as f:
+                json.dump(self.allGroups, f, ensure_ascii=False, indent=2)
+            self.LOG.info(f"已保存 {len(self.allGroups)} 个群组到缓存")
+            
+            # 保存群成员信息
+            if hasattr(self, 'group_members'):
+                # 过滤掉可能的None或空值
+                valid_group_members = {k: v for k, v in self.group_members.items() if v}
+                with open(self.group_members_cache_file, "w", encoding="utf-8") as f:
+                    json.dump(valid_group_members, f, ensure_ascii=False, indent=2)
+                self.LOG.info(f"已保存 {len(valid_group_members)} 个群的成员信息到缓存")
+            
+            return True
+        except Exception as e:
+            self.LOG.error(f"保存联系人和群组缓存失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def update_group_members(self, group_id=None):
+        """更新群成员信息
+        
+        Args:
+            group_id: 指定群ID，如果为None则更新所有群
+            
+        Returns:
+            bool: 是否更新成功
+        """
+        try:
+            if not hasattr(self, 'group_members'):
+                self.group_members = {}
+            
+            if group_id:
+                # 更新指定群
+                members = self.wcf.get_chatroom_members(group_id)
+                if members:
+                    self.group_members[group_id] = members
+                    self.LOG.info(f"已更新群 {group_id} 的成员信息，共 {len(members)} 个成员")
+                else:
+                    self.LOG.warning(f"获取群 {group_id} 的成员信息失败")
+            else:
+                # 更新所有群
+                for group_id in self.allGroups:
+                    members = self.wcf.get_chatroom_members(group_id)
+                    if members:
+                        self.group_members[group_id] = members
+                        self.LOG.info(f"已更新群 {group_id} 的成员信息，共 {len(members)} 个成员")
+                    else:
+                        self.LOG.warning(f"获取群 {group_id} 的成员信息失败")
+            
+            # 保存到缓存
+            self.save_contacts_to_cache()
+            return True
+        except Exception as e:
+            self.LOG.error(f"更新群成员信息失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+def get_wxid_by_name(robot, name: str, target_type: str = "friend") -> str:
+    """
+    根据昵称获取wxid，支持多种匹配方式
+    
+    Args:
+        robot: Robot实例
+        name: 昵称或wxid
+        target_type: 目标类型，可选 "friend" 或 "group"
+        
+    Returns:
+        str: 找到的wxid，如果未找到则返回空字符串
+    """
+    try:
+        # 如果输入已经是wxid格式，直接返回
+        if name.endswith("@chatroom") or name.endswith("@openim") or (len(name) > 10 and not name.isascii()):
+            print(f"输入似乎是wxid格式: {name}，直接使用")
+            return name
+    
+        # 检查特殊帐号
+        special_accounts = ["filehelper", "medianote"]
+        if name.lower() in special_accounts:
+            return name.lower()
+        
+        if target_type == "friend":
+            # 先在联系人列表中查找
+            if hasattr(robot, 'contacts') and robot.contacts:
+                print(f"在contacts中查找: {name}")
+                for contact in robot.contacts:
+                    if isinstance(contact, dict):
+                        # 检查各种可能的名称字段
+                        if (contact.get("name") == name or 
+                            contact.get("remark") == name or 
+                            contact.get("nickname") == name):
+                            print(f"在contacts中匹配到: {name} -> {contact.get('wxid')}")
+                            return contact.get("wxid")
+                        
+                        # 如果包含特殊字符，尝试模糊匹配
+                        if any(ord(c) > 127 for c in name):
+                            contact_name = contact.get("name", "")
+                            contact_remark = contact.get("remark", "")
+                            contact_nickname = contact.get("nickname", "")
+                            
+                            # 移除表情符号等特殊字符后比较
+                            clean_name = ''.join(c for c in name if ord(c) < 10000)
+                            clean_contact_name = ''.join(c for c in contact_name if ord(c) < 10000)
+                            clean_contact_remark = ''.join(c for c in contact_remark if ord(c) < 10000)
+                            clean_contact_nickname = ''.join(c for c in contact_nickname if ord(c) < 10000)
+                            
+                            if (clean_name and (clean_name == clean_contact_name or 
+                                            clean_name == clean_contact_remark or 
+                                            clean_name == clean_contact_nickname)):
+                                print(f"在contacts中模糊匹配到: {name}({clean_name}) -> {contact.get('wxid')}")
+                                return contact.get("wxid")
+            
+            # 然后在好友列表中查找
+            print(f"在好友列表中查找: {name}")
+            friends = robot.wcf.get_friends()
+            for friend in friends:
+                if (friend.get("name") == name or 
+                    friend.get("remark") == name or 
+                    friend.get("nickname") == name):
+                    print(f"在好友列表中匹配到: {name} -> {friend.get('wxid')}")
+                    return friend.get("wxid")
+                    
+                # 如果包含特殊字符，尝试模糊匹配
+                if any(ord(c) > 127 for c in name):
+                    friend_name = friend.get("name", "")
+                    friend_remark = friend.get("remark", "")
+                    friend_nickname = friend.get("nickname", "")
+                    
+                    # 移除表情符号等特殊字符后比较
+                    clean_name = ''.join(c for c in name if ord(c) < 10000)
+                    clean_friend_name = ''.join(c for c in friend_name if ord(c) < 10000)
+                    clean_friend_remark = ''.join(c for c in friend_remark if ord(c) < 10000)
+                    clean_friend_nickname = ''.join(c for c in friend_nickname if ord(c) < 10000)
+                    
+                    if (clean_name and (clean_name == clean_friend_name or 
+                                      clean_name == clean_friend_remark or 
+                                      clean_name == clean_friend_nickname)):
+                        print(f"在好友列表中模糊匹配到: {name}({clean_name}) -> {friend.get('wxid')}")
+                        return friend.get("wxid")
+        else:  # group
+            # 从群组列表中查找
+            if hasattr(robot, 'allGroups'):
+                for wxid, group_name in robot.allGroups.items():
+                    if group_name == name:
+                        return wxid
+                        
+                    # 如果包含特殊字符，尝试模糊匹配
+                    if any(ord(c) > 127 for c in name):
+                        # 移除表情符号等特殊字符后比较
+                        clean_name = ''.join(c for c in name if ord(c) < 10000)
+                        clean_group_name = ''.join(c for c in group_name if ord(c) < 10000)
+                        
+                        if clean_name and clean_name == clean_group_name:
+                            print(f"在群组列表中模糊匹配到: {name}({clean_name}) -> {wxid}")
+                            return wxid
+        
+        print(f"未找到与 '{name}' 匹配的wxid")
+        # 如果有特殊字符，输出清理后的结果
+        if any(ord(c) > 127 for c in name):
+            clean_name = ''.join(c for c in name if ord(c) < 10000)
+            print(f"名称包含特殊字符，清理后为: '{clean_name}'")
+                    
+        return ""
+    except Exception as e:
+        print(f"获取wxid失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return "" 

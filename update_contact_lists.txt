@@ -1,0 +1,20 @@
+# 联系人和群组数据管理优化
+
+## 修复问题
+1. 修复了`robot.py`中使用不存在的`self.wcf.get_chatrooms()`方法的问题
+2. 优化了`update_contact_info`方法，让它直接调用`update_contacts_and_groups`方法，减少代码冗余
+
+## 正确的联系人和群组数据获取方式
+- 联系人列表: `self.wcf.get_contacts()`
+- 群组列表: `self.getAllGroups()` 过滤得到 `@chatroom`类型的联系人
+- 群成员信息: `self.wcf.get_chatroom_members(group_id)`
+
+## 数据存储位置
+- 联系人数据: `self.contacts`
+- 群组数据: `self.allGroups`
+- 群成员数据: `self.group_members`
+
+## 缓存文件
+- 联系人缓存: `self.contacts_cache_file` (contacts.json)
+- 群组缓存: `self.groups_cache_file` (groups.json)
+- 群成员缓存: `self.group_members_cache_file` (group_members.json) 

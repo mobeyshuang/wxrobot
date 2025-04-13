@@ -104,4 +104,13 @@ class ConfigManager:
             return True
         except Exception as e:
             print(f"导出配置失败: {e}")
+            return False
+            
+    def save_tasks(self, tasks: List[Dict]) -> bool:
+        """保存任务列表"""
+        try:
+            self.tasks = tasks
+            return self.save_config()
+        except Exception as e:
+            print(f"保存任务列表失败: {e}")
             return False 

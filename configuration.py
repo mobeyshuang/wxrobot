@@ -15,6 +15,7 @@ class Config(object):
         self.AI_ENABLED = True
         self.GROUPS = []  # 允许的群组列表
         self.USERS = []   # 允许的用户列表
+        self.TASK_GROUPS = []  # 任务相关的群组列表
         self.DEFAULT_ROLE = "一个友好、专业、有趣的AI助手"  # 默认角色
         self.DEEPSEEK = None  # Deepseek配置
         self.CHATGPT = None   # ChatGPT配置
@@ -52,6 +53,12 @@ class Config(object):
                     self.AI_ENABLED = config.get("AI_ENABLED", True)
                     self.GROUPS = config.get("GROUPS", self.GROUPS)
                     self.USERS = config.get("USERS", self.USERS)
+                    self.TASK_GROUPS = config.get("TASK_GROUPS", [])
+                    
+                    # 加载其他自定义配置项
+                    for key, value in config.items():
+                        if key not in ["AI_ENABLED", "GROUPS", "USERS", "TASK_GROUPS"]:
+                            setattr(self, key, value)
             except Exception as e:
                 logging.warning(f"加载JSON配置文件失败，将使用默认值: {e}")
                 
@@ -61,12 +68,22 @@ class Config(object):
     def save(self) -> None:
         """保存配置到文件"""
         try:
-            # 只保存用户和群组列表到json文件
+            # 保存用户、群组和任务群组列表到json文件
             config = {
                 "AI_ENABLED": self.AI_ENABLED,
                 "GROUPS": self.GROUPS,
-                "USERS": self.USERS
+                "USERS": self.USERS,
+                "TASK_GROUPS": self.TASK_GROUPS
             }
+            
+            # 添加WECHAT_FILES_DIR和其他自定义配置
+            for attr in dir(self):
+                if not attr.startswith("_") and not callable(getattr(self, attr)) and attr not in config and attr != "config_path":
+                    value = getattr(self, attr)
+                    # 只保存基本数据类型
+                    if isinstance(value, (str, int, float, bool, list, dict)) or value is None:
+                        config[attr] = value
+            
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -75,6 +92,10 @@ class Config(object):
     def get_groups(self) -> list:
         """获取允许的群组列表"""
         return self.GROUPS
+    
+    def get_task_groups(self) -> list:
+        """获取任务相关的群组列表"""
+        return self.TASK_GROUPS
 
     def add_group(self, group_id: str) -> bool:
         """添加群组到允许列表
@@ -163,3 +184,34 @@ class Config(object):
     def get_default_role(self) -> str:
         """获取默认角色设定"""
         return self.DEFAULT_ROLE
+        
+    def get(self, key, default=None):
+        """获取配置项
+        
+        Args:
+            key: 配置项名称
+            default: 默认值，如果配置项不存在
+            
+        Returns:
+            配置项值或默认值
+        """
+        return getattr(self, key, default)
+        
+    def set(self, key, value):
+        """设置配置项
+        
+        Args:
+            key: 配置项名称
+            value: 配置项值
+            
+        Returns:
+            bool: 是否设置成功
+        """
+        try:
+            setattr(self, key, value)
+            self.save()
+            return True
+        except Exception as e:
+            logging.error(f"设置配置项失败: {e}")
+            return False
+

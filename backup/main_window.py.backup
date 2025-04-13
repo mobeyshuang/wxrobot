@@ -1,0 +1,1122 @@
+import sys
+import os
+import time
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                           QHBoxLayout, QPushButton, QLabel, QStatusBar, 
+                           QToolBar, QAction, QMessageBox, QFileDialog, QScrollArea, QFrame, QMenu, QDialog, QGroupBox, QRadioButton, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QSize
+from PyQt5.QtGui import QIcon, QFont, QColor, QBrush
+from typing import Dict, List
+import json
+
+# 添加项目根目录到Python路径
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_root)
+
+from robot import Robot, __version__
+from configuration import Config
+from wcferry import Wcf
+from constants import ChatType
+
+# 使用相对导入
+from .task_card import TaskCard
+from .task_dialog import TaskDialog
+from .config_manager import ConfigManager
+from .task_executor import TaskExecutor
+from .command_handler import CommandHandler
+from .ai_settings import AISettings
+from .transfer_task_dialog import TransferTaskDialog
+from .reply_task_dialog import ReplyTaskDialog
+from .scheduled_task_dialog import ScheduledTaskDialog
+# from .weather_task_dialog import WeatherTaskDialog
+
+class MainWindow(QMainWindow):
+    def __init__(self, robot):
+        """初始化主窗口"""
+        super().__init__()
+        self.robot = robot
+        self.wcf = robot.wcf
+        self.groups = robot.allGroups
+        self.contacts = robot.contacts  # 直接使用原始数据
+        self.tasks = []
+        self.config_manager = ConfigManager()
+        self.group_members_cache = {}  # 添加群成员缓存
+        self.task_manager = self  # 将自身作为任务管理器
+        
+        # 设置窗口标题和大小
+        self.setWindowTitle(f"WeChatRobot【{__version__}】")
+        self.setMinimumSize(800, 600)
+        
+        # 创建中心部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # 创建主布局
+        self.main_layout = QVBoxLayout(central_widget)
+        
+        # 创建菜单栏
+        self.create_menu()
+        
+        # 创建任务列表
+        self.create_task_list()
+        
+        # 创建工具栏
+        self.create_toolbar()
+        
+        # 创建状态栏
+        self.statusBar().showMessage("就绪")
+        
+        # 创建定时器
+        self.create_timers()
+        
+        # 只在联系人列表为空时自动更新
+        if not self.contacts or not self.groups:
+            QTimer.singleShot(1000, self.update_contact_lists)
+        
+        # 初始化任务执行器
+        self.task_executor = TaskExecutor(self.robot.wcf, self.robot)  # 传入 robot 参数
+        self.robot.task_executor = self.task_executor  # 将 task_executor 传递给 robot
+        
+        # 连接任务执行器的信号
+        self.task_executor.task_started.connect(self.on_task_started)
+        self.task_executor.task_stopped.connect(self.on_task_stopped)
+        self.task_executor.task_error.connect(self.on_task_error)
+        self.task_executor.stats_updated.connect(self.on_task_stats_updated)
+        self.task_executor.status_changed.connect(self.on_task_status_changed)
+        
+        # 设置应用样式
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f5f5f5;
+            }
+            QStatusBar {
+                background-color: #f0f0f0;
+                border-top: 1px solid #e0e0e0;
+                color: #555;
+                padding: 3px;
+            }
+            QLabel {
+                color: #444;
+                font-family: 'Microsoft YaHei', Arial, sans-serif;
+            }
+            QPushButton {
+                background-color: #4a86e8;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3a76d8;
+            }
+            QPushButton:pressed {
+                background-color: #2a66c8;
+            }
+            QTableView {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                selection-background-color: #e0e8f5;
+                selection-color: #333;
+                alternate-background-color: #f9f9f9;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                padding: 6px;
+                border: 1px solid #ddd;
+                border-left: none;
+                font-weight: bold;
+                color: #555;
+            }
+        """)
+        
+        # 设置全局字体大小
+        font = QFont()
+        font.setPointSize(10)
+        QApplication.setFont(font)
+        
+        # 启动定时器检查任务状态
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_task_status)
+        self.timer.start(5000)  # 每5秒更新一次任务状态
+        
+        # 创建定时器用于运行机器人待处理的任务
+        self.robot_job_timer = QTimer()
+        self.robot_job_timer.timeout.connect(self.run_robot_jobs)
+        self.robot_job_timer.start(1000)  # 每秒执行一次
+        
+        # 在 task_executor 初始化后加载配置
+        QTimer.singleShot(100, self.load_config)
+        
+    def create_toolbar(self):
+        """创建工具栏"""
+        toolbar = self.addToolBar("工具栏")
+        toolbar.setMovable(False)
+        
+        # 更新群成员按钮
+        update_members_action = QAction("更新群成员", self)
+        update_members_action.triggered.connect(self.update_all_group_members)
+        toolbar.addAction(update_members_action)
+        
+        # 诊断按钮
+        diagnose_action = QAction("系统诊断", self)
+        diagnose_action.triggered.connect(self.diagnose_system)
+        toolbar.addAction(diagnose_action)
+        
+    def show_add_menu(self):
+        """显示添加任务选择对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择任务类型")
+        dialog.setMinimumWidth(600)
+        
+        # 创建水平布局
+        layout = QHBoxLayout(dialog)
+        layout.setSpacing(20)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 创建三个大按钮
+        # 1. 消息转发任务按钮
+        transfer_btn = QPushButton("消息转发任务")
+        transfer_btn.setMinimumHeight(100)
+        transfer_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a86e8;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #3a76d8;
+            }
+        """)
+        transfer_btn.clicked.connect(lambda: self.show_task_dialog("transfer", dialog))
+        layout.addWidget(transfer_btn)
+        
+        # 2. 自动回复任务按钮
+        reply_btn = QPushButton("自动回复任务")
+        reply_btn.setMinimumHeight(100)
+        reply_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4caf50;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #3c9f40;
+            }
+        """)
+        reply_btn.clicked.connect(lambda: self.show_task_dialog("reply", dialog))
+        layout.addWidget(reply_btn)
+        
+        # 3. 定时发送任务按钮
+        schedule_btn = QPushButton("定时发送任务")
+        schedule_btn.setMinimumHeight(100)
+        schedule_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #e68a00;
+            }
+        """)
+        schedule_btn.clicked.connect(lambda: self.show_task_dialog("schedule", dialog))
+        layout.addWidget(schedule_btn)
+        
+        dialog.exec_()
+        
+    def show_task_dialog(self, task_type, parent_dialog=None):
+        """显示任务对话框"""
+        if parent_dialog:
+            parent_dialog.close()
+            
+        if task_type == "transfer":
+            self.add_transfer_task()
+        elif task_type == "reply":
+            self.add_reply_task()
+        elif task_type == "schedule":
+            self.add_scheduled_task()
+        
+    def add_transfer_task(self):
+        """添加消息转发任务"""
+        dialog = TransferTaskDialog(self)
+        dialog.update_contact_lists(self.groups, self.contacts)
+        if dialog.exec_():
+            task_config = dialog.get_config()
+            try:
+                # 直接添加到任务列表
+                self.tasks.append(task_config)
+                # 保存配置
+                self.save_config()
+                # 刷新任务列表
+                self.refresh_task_list()
+                self.statusBar().showMessage(f"已添加任务: {task_config['name']}")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"添加任务失败: {str(e)}")
+                
+    def add_reply_task(self):
+        """添加消息回复任务"""
+        dialog = ReplyTaskDialog(self)
+        dialog.update_contact_lists(self.groups, self.contacts)
+        if dialog.exec_():
+            task_config = dialog.get_config()
+            try:
+                # 直接添加到任务列表
+                self.tasks.append(task_config)
+                # 保存配置
+                self.save_config()
+                # 刷新任务列表
+                self.refresh_task_list()
+                self.statusBar().showMessage(f"已添加任务: {task_config['name']}")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"添加任务失败: {str(e)}")
+                
+    def add_scheduled_task(self):
+        """添加定时任务"""
+        from gui.scheduled_task_dialog import ScheduledTaskDialog
+        dialog = ScheduledTaskDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            config = dialog.get_config()
+            self.task_manager.add_task(config)
+            self.refresh_task_list()
+        
+    def update_contact_lists(self):
+        """更新联系人和群组列表"""
+        try:
+            self.groups = {}
+            # 只获取真正的群聊
+            for group_wxid, group_name in self.robot.allGroups.items():
+                if group_wxid.endswith("@chatroom"):
+                    self.groups[group_name] = group_wxid
+            
+            # 直接使用原始联系人数据
+            self.contacts = self.robot.contacts
+            
+            self.statusBar().showMessage("联系人列表更新完成")
+        except Exception as e:
+            self.statusBar().showMessage(f"更新联系人列表失败: {str(e)}")
+            print(f"更新联系人列表失败: {str(e)}")
+            
+    def import_config(self):
+        """导入配置"""
+        try:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择配置文件", "", "JSON Files (*.json)")
+        if file_path:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.tasks = json.load(f)
+                self.save_config()
+                self.refresh_task_list()
+                self.statusBar().showMessage("配置导入成功")
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"导入配置失败: {str(e)}")
+        
+    def export_config(self):
+        """导出配置"""
+        try:
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存配置文件", "", "JSON Files (*.json)")
+        if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+                self.statusBar().showMessage("配置导出成功")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", f"导出配置失败: {str(e)}")
+        
+    def refresh_task_list(self):
+        """刷新任务列表"""
+        try:
+            # 清空表格
+            self.task_table.setRowCount(0)
+            
+            # 添加任务
+            for task in self.tasks:
+                row = self.task_table.rowCount()
+                self.task_table.insertRow(row)
+                
+                # 任务名称
+                name_item = QTableWidgetItem(task["name"])
+                self.task_table.setItem(row, 0, name_item)
+                
+                # 任务类型
+                type_item = QTableWidgetItem(task["type"])
+                self.task_table.setItem(row, 1, type_item)
+                
+                # 目标
+                target_type = task.get("target_type", "")
+                target = task.get("target", "")
+                target_text = f"{target_type}: {target}"
+                target_item = QTableWidgetItem(target_text)
+                self.task_table.setItem(row, 2, target_item)
+                
+                # 状态
+                status = task.get("status", "stopped")
+                status_item = QTableWidgetItem("运行中" if status == "running" else "已停止")
+                self.task_table.setItem(row, 3, status_item)
+                
+                # 获取任务统计信息
+                stats = self.task_executor.get_task_stats(task["name"])
+                succeeded = stats.get("succeeded", 0)
+                
+                # 统计信息（只显示成功次数）
+                stats_text = f"成功: {succeeded}"
+                stats_item = QTableWidgetItem(stats_text)
+                self.task_table.setItem(row, 4, stats_item)
+                
+                # 操作按钮
+                button_widget = QWidget()
+                button_layout = QHBoxLayout(button_widget)
+                button_layout.setContentsMargins(0, 0, 0, 0)
+                
+                # 启动/停止按钮
+                toggle_button = QPushButton("停止" if status == "running" else "启动")
+                toggle_button.clicked.connect(lambda checked, t=task: self.toggle_task(t["name"]))
+                button_layout.addWidget(toggle_button)
+                
+                # 编辑按钮
+                edit_button = QPushButton("编辑")
+                edit_button.clicked.connect(lambda checked, t=task: self.edit_task(t))
+                button_layout.addWidget(edit_button)
+                
+                # 删除按钮
+                delete_button = QPushButton("删除")
+                delete_button.clicked.connect(lambda checked, t=task: self.delete_task(t))
+                button_layout.addWidget(delete_button)
+                
+                self.task_table.setCellWidget(row, 5, button_widget)
+                
+            # 调整列宽
+            self.task_table.horizontalHeader().resizeSection(0, 150)
+            self.task_table.horizontalHeader().resizeSection(1, 100)
+            self.task_table.horizontalHeader().resizeSection(2, 200)
+            self.task_table.horizontalHeader().resizeSection(3, 100)
+            self.task_table.horizontalHeader().resizeSection(4, 100)
+            self.task_table.horizontalHeader().resizeSection(5, 200)
+            
+        except Exception as e:
+            print(f"刷新任务列表失败: {e}")
+            import traceback
+            traceback.print_exc()
+        
+    def toggle_task(self, task_name):
+        """启动或停止任务"""
+        for task in self.tasks:
+            if task["name"] == task_name:
+                current_status = task.get("status", "stopped")
+                new_status = "stopped" if current_status == "running" else "running"
+                task["status"] = new_status
+                is_running = new_status == "running"
+                
+                # 更新任务执行器中的任务状态
+                if hasattr(self, 'task_executor'):
+                    if task_name in self.task_executor.tasks:
+                        # 使用toggle_task_status方法来切换任务状态
+                        self.task_executor.toggle_task_status(task_name, is_running)
+                    elif is_running:
+                        # 如果任务不在task_executor中并且要启动，先启动它
+                        self.task_executor.start_task(task)
+                        
+                # 保存配置
+                self.save_config()
+                
+                # 刷新任务列表
+                self.refresh_task_list()
+                
+                return True
+        return False
+        
+    def edit_task(self, task):
+        """编辑任务"""
+        try:
+            # 获取任务配置
+            task_name = task["name"]
+            task_config = None
+            for t in self.tasks:
+                if t["name"] == task_name:
+                    task_config = t
+                    break
+                
+            if not task_config:
+                QMessageBox.warning(self, "警告", "任务不存在")
+                return
+            
+            # 根据任务类型创建对应的对话框
+            dialog = None
+            if task_config.get("type") == "transfer":
+                dialog = TransferTaskDialog(self, task_config)
+            elif task_config.get("type") == "reply":
+                dialog = ReplyTaskDialog(self, task_config)
+            elif task_config.get("type") == "schedule":
+                from gui.scheduled_task_dialog import ScheduledTaskDialog
+                dialog = ScheduledTaskDialog(self, task_config)
+                # 确保正确更新联系人列表
+                dialog.update_contact_lists(self.groups, self.contacts)
+            else:
+                QMessageBox.warning(self, "警告", "不支持的任务类型")
+                return
+            
+            # 显示对话框
+            if dialog.exec_() == QDialog.Accepted:
+                # 获取新的配置
+                new_config = dialog.get_config()
+                print(f"编辑任务 '{task_name}' 获取到新配置: {new_config}")
+                # 更新任务
+                self.update_task(task_name, new_config)
+        except Exception as e:
+            print(f"编辑任务失败: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"编辑任务失败: {str(e)}")
+        
+    def delete_task(self, task):
+        """删除任务"""
+        try:
+            task_name = task["name"]
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确定要删除任务 '{task_name}' 吗？\n此操作将永久删除该任务。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 先停止任务（如果正在运行）
+                if task.get("status") == "running" and hasattr(self, 'task_executor'):
+                    try:
+                        self.task_executor.stop_task(task_name)
+                        print(f"已停止任务: {task_name}")
+                    except Exception as e:
+                        print(f"停止任务出错: {e}")
+                        
+                # 尝试从task_executor中删除任务（但不依赖其返回值）
+                if hasattr(self, 'task_executor'):
+                    try:
+                        self.task_executor.delete_task(task_name)
+                        print(f"已从task_executor中删除任务: {task_name}")
+                    except Exception as e:
+                        print(f"从task_executor删除任务出错: {e}")
+                
+                # 直接从任务列表中删除
+                original_count = len(self.tasks)
+                self.tasks = [t for t in self.tasks if t.get("name") != task_name]
+                deleted_count = original_count - len(self.tasks)
+                
+                if deleted_count > 0:
+                    print(f"从任务列表中删除了 {deleted_count} 个任务")
+                    
+                    # 保存配置文件
+                    self.save_config()
+                    
+                    # 刷新界面
+                    self.refresh_task_list()
+                    
+                    self.statusBar().showMessage(f"任务 '{task_name}' 已永久删除")
+                else:
+                    print(f"未找到要删除的任务: {task_name}")
+                    QMessageBox.warning(self, "删除失败", f"未找到任务 '{task_name}'")
+                
+        except Exception as e:
+            print(f"删除任务失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "操作失败", f"删除任务失败: {str(e)}")
+        
+    def save_config(self):
+        """保存配置到文件"""
+        try:
+            # 获取当前所有任务的配置
+            tasks_config = []
+            
+            # 首先添加任务列表中的任务
+            for task in self.tasks:
+                task_name = task.get("name")
+                if task_name:  # 确保任务有名称
+                    task_config = task.copy()
+                    
+                    # 确保last_state被正确设置
+                    if "status" in task_config:
+                        task_config["last_state"] = task_config.get("status") == "running"
+                    
+                    tasks_config.append(task_config)
+            
+            # 保存到文件
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "tasks.json")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(tasks_config, f, ensure_ascii=False, indent=2)
+                
+            print(f"配置已保存到: {config_path}")
+            print(f"保存了 {len(tasks_config)} 个任务")
+            
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+            import traceback
+            print(traceback.format_exc())
+        
+    def normalize_tasks(self, tasks_list):
+        """标准化任务配置，将使用群ID的转发任务转换为使用群名"""
+        if not tasks_list:
+            return []
+        
+        normalized_tasks = []
+        conversion_count = 0
+        
+        for task in tasks_list:
+            task_type = task.get("type")
+            
+            # 处理转发任务
+            if task_type == "transfer":
+                # 检查source是否为群ID
+                source = task.get("source", "")
+                source_type = task.get("source_type", "群聊")
+                
+                if source_type == "群聊" and "@chatroom" in source:
+                    # 将群ID转换为群名
+                    if source in self.robot.allGroups:
+                        print(f"将来源群ID {source} 转换为群名: {self.robot.allGroups[source]}")
+                        task["source"] = self.robot.allGroups[source]
+                        conversion_count += 1
+                    else:
+                        print(f"警告: 找不到群ID {source} 对应的群名")
+                
+                # 检查target是否为群ID
+                target = task.get("target", "")
+                target_type = task.get("target_type", "群聊")
+                
+                if target_type == "群聊" and "@chatroom" in target:
+                    # 将群ID转换为群名
+                    if target in self.robot.allGroups:
+                        print(f"将目标群ID {target} 转换为群名: {self.robot.allGroups[target]}")
+                        task["target"] = self.robot.allGroups[target]
+                        conversion_count += 1
+                    else:
+                        print(f"警告: 找不到群ID {target} 对应的群名")
+            
+            normalized_tasks.append(task)
+        
+        if conversion_count > 0:
+            print(f"已规范化 {conversion_count} 个任务配置项")
+            # 立即保存更新后的配置
+            self.save_config()
+        
+        return normalized_tasks
+    
+    def load_config(self):
+        """从JSON文件加载配置"""
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../config/tasks.json")
+            self.config_file = config_path
+            print(f"正在从以下路径加载配置文件: {config_path}")
+            
+            if os.path.exists(config_path):
+                print("配置文件存在，开始读取...")
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    tasks = json.load(f)
+                    
+                # 标准化任务配置（将使用群ID的转发任务转换为使用群名）
+                self.tasks = self.normalize_tasks(tasks)
+                print(f"读取到的任务配置: {json.dumps(self.tasks, ensure_ascii=False, indent=2)}")
+                
+                self.refresh_task_list()
+                
+                # 如果 task_executor 已经初始化，则自动启动状态为 running 的任务
+                if hasattr(self, 'task_executor'):
+                    for task in self.tasks:
+                        if task.get("status") == "running":
+                            print(f"自动启动任务: {task['name']}")
+                            self.task_executor.start_task(task)
+                else:
+                    print("task_executor 尚未初始化，稍后将自动启动任务")
+            else:
+                print("配置文件不存在")
+                self.tasks = []
+        except Exception as e:
+            print(f"加载配置失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "配置加载失败", f"无法加载配置文件: {str(e)}")
+            self.tasks = []
+        
+    def create_timers(self):
+        """创建定时器"""
+        # 创建任务状态更新定时器
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh_task_list)
+        self.timer.start(5000)  # 每5秒更新一次
+        
+        # 创建机器人任务执行定时器
+        self.robot_job_timer = QTimer()
+        self.robot_job_timer.timeout.connect(self.run_robot_jobs)
+        self.robot_job_timer.start(1000)  # 每秒执行一次
+        
+    def create_menu(self):
+        """创建菜单栏"""
+        menu_bar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menu_bar.addMenu("文件")
+        
+        import_action = QAction("导入配置", self)
+        import_action.triggered.connect(self.import_config)
+        file_menu.addAction(import_action)
+        
+        export_action = QAction("导出配置", self)
+        export_action.triggered.connect(self.export_config)
+        file_menu.addAction(export_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("退出", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # 任务菜单
+        task_menu = menu_bar.addMenu("任务")
+        
+        add_task_action = QAction("添加任务", self)
+        add_task_action.triggered.connect(self.show_add_menu)
+        task_menu.addAction(add_task_action)
+        
+        refresh_action = QAction("刷新任务", self)
+        refresh_action.triggered.connect(self.refresh_task_list)
+        task_menu.addAction(refresh_action)
+        
+        # 更新人员菜单
+        update_menu = menu_bar.addMenu("更新人员")
+        
+        update_contacts_action = QAction("更新联系人", self)
+        update_contacts_action.triggered.connect(self.update_contact_lists)
+        update_menu.addAction(update_contacts_action)
+        
+        # 帮助菜单
+        help_menu = menu_bar.addMenu("帮助")
+        
+        about_action = QAction("关于", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+        
+        diagnose_action = QAction("系统诊断", self)
+        diagnose_action.triggered.connect(self.diagnose_system)
+        help_menu.addAction(diagnose_action)
+        
+    def show_about(self):
+        """显示关于对话框"""
+        QMessageBox.about(self, "关于",
+            "微信机器人控制面板\n\n"
+            "版本: 1.0.0\n"
+            "作者: Your Name\n"
+            "联系方式: your.email@example.com")
+        
+    def create_task_list(self):
+        """创建任务列表"""
+        # 创建表格
+        self.task_table = QTableWidget()
+        self.task_table.setColumnCount(6)
+        self.task_table.setHorizontalHeaderLabels(["任务名称", "任务类型", "目标", "状态", "统计信息", "操作"])
+        
+        # 设置表格样式
+        self.task_table.setStyleSheet("""
+            QTableWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: white;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QHeaderView::section {
+                background-color: #f5f5f5;
+                padding: 5px;
+                border: 1px solid #ddd;
+                font-weight: bold;
+            }
+        """)
+        
+        # 设置列宽
+        header = self.task_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)  # 任务名称列自适应
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 任务类型列
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 目标列
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 状态列
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 统计信息列
+        header.setSectionResizeMode(5, QHeaderView.Fixed)  # 操作列
+        header.resizeSection(5, 200)
+        
+        # 添加到主布局
+        self.main_layout.addWidget(self.task_table)
+        
+    def on_task_started(self, task_name: str):
+        """任务启动处理"""
+        print(f"任务 '{task_name}' 已启动")
+        self.statusBar().showMessage(f"任务 '{task_name}' 已启动")
+        
+    def on_task_stopped(self, task_name: str):
+        """任务停止处理"""
+        print(f"任务 '{task_name}' 已停止")
+        self.statusBar().showMessage(f"任务 '{task_name}' 已停止")
+        
+    def on_task_error(self, task_name: str, error: str):
+        """任务错误处理"""
+        print(f"任务 '{task_name}' 发生错误: {error}")
+        self.statusBar().showMessage(f"任务 '{task_name}' 发生错误: {error}")
+        
+    def on_task_status_changed(self, task_name: str, status: bool):
+        """任务状态变化处理"""
+        # 更新表格中的任务状态
+        for row in range(self.task_table.rowCount()):
+            if self.task_table.item(row, 0).text() == task_name:
+                status_item = self.task_table.item(row, 3)
+                status_text = "运行中" if status else "已停止"
+                status_item.setText(status_text)
+                status_color = QColor("#4CAF50") if status else QColor("#F44336")
+                status_item.setForeground(status_color)
+                break
+            
+    def on_task_stats_updated(self, task_name: str, stats: Dict):
+        """任务统计数据更新处理"""
+        # 更新表格中的任务统计
+        for row in range(self.task_table.rowCount()):
+            if self.task_table.item(row, 0).text() == task_name:
+                # 更新成功次数
+                if "success_count" in stats:
+                    success_item = self.task_table.item(row, 4)
+                    success_item.setText(str(stats["success_count"]))
+                break
+            
+    def update_task_status(self):
+        """更新任务状态"""
+        try:
+            # 获取微信连接状态
+            is_logged_in = self.robot.wcf.is_login()
+            status_text = f"微信状态: {'已登录' if is_logged_in else '未登录'}"
+            
+            # 获取任务状态
+            running_tasks = sum(1 for task in self.tasks if task.get("status", "stopped") == "running")
+            status_text += f" | 运行中任务: {running_tasks}/{len(self.tasks)}"
+            
+            self.statusBar().showMessage(status_text)
+        except Exception as e:
+            self.statusBar().showMessage(f"更新任务状态失败: {str(e)}")
+            print(f"更新任务状态失败: {str(e)}")
+            
+    def show_ai_settings(self):
+        """显示AI设置界面"""
+        # 这里可以实现一个AI设置对话框
+        # 暂时用消息框代替
+        ai_status = "开启" if self.ai_settings.is_ai_enabled() else "关闭"
+        allowed_users = len(self.ai_settings.get_users())
+        allowed_groups = len(self.ai_settings.get_groups())
+        
+        message = f"""
+        AI设置状态:
+        
+        AI功能: {ai_status}
+        允许的用户数: {allowed_users}
+        允许的群组数: {allowed_groups}
+        
+        您可以通过发送"^设置"命令来配置AI功能。
+        """
+        
+        QMessageBox.information(self, "AI设置", message)
+    
+    def diagnose_system(self):
+        """诊断系统状态"""
+        try:
+            print("开始系统诊断...")
+            results = []
+            
+            # 检查1: 微信登录状态
+            is_logged_in = self.robot.wcf.is_login()
+            results.append(f"微信登录状态: {'已登录' if is_logged_in else '未登录'}")
+            
+            # 检查2: 消息接收状态
+            is_receiving = self.robot.wcf.is_receiving_msg()
+            results.append(f"消息接收状态: {'已启用' if is_receiving else '未启用'}")
+            
+            # 检查3: 尝试获取wxid
+            try:
+                wxid = self.robot.wxid
+                results.append(f"当前登录的wxid: {wxid}")
+            except Exception as e:
+                results.append(f"获取wxid失败: {str(e)}")
+            
+            # 检查4: 尝试查询微信版本
+            try:
+                version = self.robot.wcf.get_wechat_version()
+                results.append(f"微信版本: {version}")
+            except Exception as e:
+                results.append(f"查询微信版本失败: {str(e)}")
+            
+            # 检查5: 尝试发送简单消息
+            try:
+                test_msg = "诊断测试消息 " + time.strftime("%Y-%m-%d %H:%M:%S")
+                test_result = self.robot.wcf.send_text(test_msg, "filehelper")
+                results.append(f"测试消息发送API返回: {'成功' if test_result else '失败'}")
+                results.append("提示: 即使API返回失败，实际消息可能仍已发送成功。请检查文件传输助手。")
+            except Exception as e:
+                results.append(f"测试消息发送异常: {str(e)}")
+            
+            # 显示诊断结果
+            diagnosis_text = "\n".join(results)
+            print(diagnosis_text)
+            
+            # 如果检测到问题，提供解决建议
+            suggestions = []
+            has_problem = False
+            
+            if not is_logged_in:
+                has_problem = True
+                suggestions.append("请确保微信已登录")
+            
+            if not is_receiving:
+                has_problem = True
+                suggestions.append("消息接收未启用，尝试重启应用")
+                # 尝试重新启用消息接收
+                try:
+                    self.robot.enableReceivingMsg()
+                    suggestions.append("已尝试重新启用消息接收")
+                except Exception as e:
+                    suggestions.append(f"重启消息接收失败: {str(e)}")
+            
+            # 添加建议：检查消息接收是否正常
+            reply = QMessageBox.question(
+                self,
+                "消息接收测试",
+                "为验证消息接收功能是否正常，请尝试在手机微信中向自己发送一条消息。\n\n您是否收到了自己发送的消息？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.No:
+                has_problem = True
+                suggestions.append("消息接收测试失败，建议尝试重启消息接收功能")
+                suggestions.append("如果问题仍然存在，请尝试重新连接微信")
+            else:
+                results.append("消息接收测试通过: 成功收到消息")
+                
+            # 更新诊断文本
+            diagnosis_text = "\n".join(results)
+            
+            if suggestions:
+                suggestions_text = "\n".join(suggestions)
+                diagnosis_text += f"\n\n建议操作:\n{suggestions_text}"
+            
+            if not has_problem:
+                diagnosis_text += "\n\n未检测到明显问题，但消息处理可能仍有异常。建议重启应用后重试。"
+                
+            QMessageBox.information(self, "系统诊断结果", diagnosis_text)
+        except Exception as e:
+            error_msg = f"诊断过程出错: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "诊断失败", error_msg)
+            
+    def closeEvent(self, event):
+        """关闭窗口时的处理"""
+        try:
+            # 显示状态
+            self.statusBar().showMessage("正在关闭程序...")
+        
+        # 停止定时器
+            self.timer.stop()
+        self.robot_job_timer.stop()
+            
+            # 快速停止任务执行器，避免逐个处理任务导致卡住
+            if hasattr(self, 'task_executor'):
+                self.statusBar().showMessage("正在停止任务执行器...")
+                self.task_executor.stop()
+            
+            # 保存配置
+            self.statusBar().showMessage("正在保存配置...")
+            self.save_config()
+        
+        # 记录日志
+        print("微信机器人控制中心已关闭")
+        
+        event.accept() 
+        except Exception as e:
+            print(f"关闭窗口时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            event.accept()  # 即使出错也强制接受关闭事件
+
+    def run_robot_jobs(self):
+        """运行机器人待处理的任务，替代keepRunningAndBlockProcess()"""
+        try:
+            # 调用机器人的runPendingJobs方法执行定时任务
+            self.robot.runPendingJobs()
+        except Exception as e:
+            print(f"运行机器人任务失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def update_all_group_members(self):
+        """更新所有群的成员列表"""
+        try:
+            self.statusBar().showMessage("正在更新群成员列表...")
+            for group_name, group_id in self.groups.items():
+                members = self.wcf.get_chatroom_members(group_id)
+                if members:
+                    self.group_members_cache[group_name] = members
+            self.statusBar().showMessage("群成员列表更新完成")
+        except Exception as e:
+            self.statusBar().showMessage(f"更新群成员列表失败: {str(e)}")
+            
+    def update_task_group_members(self, task):
+        """更新指定任务的群成员列表"""
+        try:
+            group_name = task.get("source", "")
+            if not group_name:
+                return
+            
+            self.statusBar().showMessage(f"正在更新群 '{group_name}' 的成员列表...")
+            members = self.wcf.get_chatroom_members(self.groups[group_name])
+            if members:
+                self.group_members_cache[group_name] = members
+                self.statusBar().showMessage(f"群 '{group_name}' 的成员列表更新完成")
+            else:
+                self.statusBar().showMessage(f"获取群 '{group_name}' 的成员列表失败")
+        except Exception as e:
+            self.statusBar().showMessage(f"更新群成员列表失败: {str(e)}")
+            
+    def update_member_list(self, group_name):
+        """更新群成员下拉列表"""
+        if not self.source_type_group_radio.isChecked() or not group_name:
+            return
+            
+        # 清空成员列表
+        self.member_combo.clear()
+        self.member_combo.addItem("全部")
+        
+        # 从缓存中获取成员列表
+        if group_name in self.group_members_cache:
+            members = self.group_members_cache[group_name]
+            member_names = []
+            for m in members:
+                if isinstance(m, dict):
+                    member_names.append(m.get("name", ""))
+                elif isinstance(m, str):
+                    member_names.append(m)
+            self.member_combo.add_items(member_names)
+        else:
+            # 如果缓存中没有，则获取并缓存
+            try:
+                members = self.wcf.get_chatroom_members(self.groups[group_name])
+                if members:
+                    self.group_members_cache[group_name] = members
+                    member_names = []
+                    for m in members:
+                        if isinstance(m, dict):
+                            member_names.append(m.get("name", ""))
+                        elif isinstance(m, str):
+                            member_names.append(m)
+                    self.member_combo.add_items(member_names)
+            except Exception as e:
+                print(f"获取群成员失败: {str(e)}")
+                self.statusBar().showMessage("获取群成员失败，请点击更新群成员按钮手动更新")
+
+    def get_task_config(self, task_id: str) -> dict:
+        """获取任务配置"""
+        for task in self.tasks:
+            if task.get("name") == task_id:
+                return task.copy()
+        return None
+
+    def update_task(self, task_id: str, new_config: dict):
+        """更新任务配置"""
+        for i, task in enumerate(self.tasks):
+            if task.get("name") == task_id:
+                # 保存原始任务状态
+                old_status = task.get("status", "stopped")
+                was_running = old_status == "running"
+                
+                # 对于定时任务，需要停止旧的任务调度
+                if task.get("type") == "schedule" and was_running:
+                    self.task_executor.stop_task(task_id)
+                    print(f"已停止原定时任务: {task_id}")
+                
+                # 更新任务配置
+                self.tasks[i] = new_config
+                
+                # 确保状态被保留
+                if was_running:
+                    self.tasks[i]["status"] = "running"
+                    self.tasks[i]["last_state"] = True
+                
+                # 保存配置
+                self.save_config()
+                
+                # 如果是定时任务且之前是运行状态，需要用新配置重新启动
+                if task.get("type") == "schedule" and was_running:
+                    print(f"用新配置重启定时任务: {task_id}")
+                    # 启动更新后的任务
+                    self.task_executor.start_task(self.tasks[i])
+                
+                # 刷新UI
+                self.refresh_task_list()
+                self.statusBar().showMessage(f"任务 '{task_id}' 已更新")
+                
+                # 打印更新后的配置，便于调试
+                print(f"更新后的任务配置: {self.tasks[i]}")
+                break
+
+    def update_group_list(self):
+        """更新群聊列表"""
+        try:
+            # 获取群聊列表
+            groups = self.wcf.get_chatroom_list()
+            # 更新群聊字典
+            self.groups = {}
+            for group_id in groups:
+                try:
+                    group_name = self.wcf.get_chatroom_name(group_id)
+                    if group_name:
+                        self.groups[group_name] = group_id
+                except Exception as e:
+                    print(f"获取群名称失败: {str(e)}")
+                    
+            # 更新任务执行器的群聊列表
+            if hasattr(self, 'task_executor'):
+                self.task_executor.update_groups(self.groups)
+                
+            return True
+        except Exception as e:
+            print(f"更新群聊列表失败: {str(e)}")
+            return False 
+
+    def add_task(self, config):
+        """添加任务到任务列表并保存配置
+        
+        Args:
+            config: 任务配置字典
+            
+        Returns:
+            bool: 是否成功添加任务
+        """
+        try:
+            # 添加到任务列表
+            self.tasks.append(config)
+            
+            # 保存配置
+            self.save_config()
+            
+            # 如果任务状态为运行，则启动任务
+            if config.get("status") == "running":
+                self.task_executor.start_task(config)
+                
+            # 刷新任务列表
+            self.refresh_task_list()
+            
+            self.statusBar().showMessage(f"已添加任务: {config['name']}")
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"添加任务失败: {str(e)}")
+            return False 
